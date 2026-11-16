@@ -2,5 +2,6 @@
   "name": "agent-monitor",
   "version": "0.2.0",
   "description": "Panel neben dem Chat, das live zeigt, was Hauptagent und Subagenten gerade tun",
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }
