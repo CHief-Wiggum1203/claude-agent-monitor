@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, StateDollar, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Register, StateDollar, ToolCallInput } from 'claude-code'
 
-import type { Agent, Call, FileTouch, Status } from '../types'
+import type { Agent, Call, FileTouch, Run, Status } from '../types'
 
 const PANE = 'agent-monitor'
 const TITLE = 'Agenten live'
@@ -10,7 +10,7 @@ const MAIN = 'main'
 // Change the tag when Agent's fields change: it declines what an earlier
 // version stored, which outlives a reload.
 const agents = atom({ plugin: 'agent-monitor', key: 'agents' } as const, [], {
-  shape: 'agents-2',
+  shape: 'agents-3',
 })
 
 // The main agent wears Claude's own orange; each subagent the first free one after it.
@@ -39,9 +39,16 @@ function freeColor(list: readonly Agent[]) {
   return PALETTE.slice(1).find(c => !used.has(c)) ?? PALETTE[1 + (list.length % (PALETTE.length - 1))] ?? '#4C8DF6'
 }
 const files = atom({ plugin: 'agent-monitor', key: 'files' } as const, [], {
-  shape: 'files-1',
+  shape: 'files-2',
 })
 const tab = atom({ plugin: 'agent-monitor', key: 'tab' } as const, 'agents')
+// Earlier prompts, newest first, and the one running now.
+const history = atom({ plugin: 'agent-monitor', key: 'history' } as const, [], {
+  shape: 'history-1',
+})
+const prompt = atom({ plugin: 'agent-monitor', key: 'prompt' } as const, '')
+// The earlier prompts opened in the pane.
+const expanded = atom({ plugin: 'agent-monitor', key: 'expanded' } as const, [])
 
 // How each file tool touches its file.
 const FILE_TOOLS: Record<string, 'reads' | 'edits' | 'writes'> = {
@@ -152,13 +159,41 @@ function ordered(list: readonly Agent[]) {
   return rows
 }
 
-function elapsed(agent: Agent, at: number) {
-  const end = agent.endedAt ?? Math.max(at, agent.startedAt)
-  const seconds = Math.max(0, Math.round((end - agent.startedAt) / 1000))
+function clock(ms: number) {
+  const seconds = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export const register: Register = on => {
+const elapsed = (agent: Agent, at: number) =>
+  clock((agent.endedAt ?? Math.max(at, agent.startedAt)) - agent.startedAt)
+
+const isChanged = (f: FileTouch) => f.edits + f.writes > 0
+const isConflict = (f: FileTouch) => f.editorIds.length > 1
+const fileName = (path: string) => path.split('/').pop() ?? path
+const agentName = (a: Agent) => (a.id === MAIN ? 'Hauptagent' : a.label || 'Subagent')
+
+// Whether the status line holds this mod's entry, so it is cleared once.
+let hasStatus = false
+
+async function showStatus($: EngineInterface) {
+  const list = await read($, agents)
+  const running = list.filter(a => a.isSpawned && a.status === 'running')
+  if (running.length === 0) {
+    if (hasStatus) $.ui.status(undefined)
+    hasStatus = false
+    return
+  }
+  const at = await $.clock.now()
+  const since = Math.min(...running.map(a => a.startedAt))
+  const count = running.length === 1 ? '1 Agent läuft' : `${running.length} Agenten laufen`
+  $.ui.status(`● ${count} · ${clock(at - since)}`)
+  hasStatus = true
+}
+
+export const register: Register = (on, options) => {
+  const historySize = Number(options.historySize)
+  const stallMs = Number(options.stallSeconds) * 1000
+  const hasSound = options.sound === true
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'agenten',
@@ -167,9 +202,11 @@ export const register: Register = on => {
     void $.ui.open({ id: PANE, title: TITLE })
     $.clock.every(1000, async () => {
       const list = await read($, agents)
-      if (!list.some(a => a.status === 'running')) return
-      const at = await $.clock.now()
-      await update($, now, () => at)
+      if (list.some(a => a.status === 'running')) {
+        const at = await $.clock.now()
+        await update($, now, () => at)
+      }
+      await showStatus($)
     })
 
     return next(e)
@@ -184,14 +221,23 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     const at = await $.clock.now()
     if (e.agentId === undefined) {
-      // A new prompt: the subagents that finished before it leave the pane.
-      await update($, agents, list => list.filter(a => a.id === MAIN || a.status === 'running'))
+      // A new prompt: the one before it moves into the history, with the
+      // subagents that finished; those still running stay in the pane.
+      const list = await read($, agents)
+      if (historySize > 0 && list.some(a => a.id === MAIN)) {
+        const kept = list.filter(a => a.id === MAIN || a.status !== 'running')
+        const run: Run = { id: `run-${at}`, prompt: await read($, prompt), agents: kept, files: await read($, files) }
+        await update($, history, runs => [run, ...runs].slice(0, historySize))
+      }
+      await update($, prompt, () => e.text.trim().split('\n')[0] ?? '')
+      await update($, agents, all => all.filter(a => a.id === MAIN || a.status === 'running'))
       await update($, files, () => [])
       await upsert($, MAIN, at, a => ({ ...a, status: 'running', startedAt: at, endedAt: null, calls: 0, running: [] }))
     } else {
       await upsert($, e.agentId, at, a => ({ ...a, status: 'running', endedAt: null }))
     }
     await update($, now, () => at)
+    await showStatus($)
 
     return next(e)
   })
@@ -215,8 +261,8 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const id = e.agentId ?? MAIN
-    const call: Call = { id: e.tool_use_id, tool: toolName(e.tool), detail: detailOf(e) }
     const at = await $.clock.now()
+    const call: Call = { id: e.tool_use_id, tool: toolName(e.tool), detail: detailOf(e), startedAt: at }
     await upsert($, id, at, a => ({ ...a, status: 'running', calls: a.calls + 1, running: [...a.running, call] }))
     const ran = await next(e)
     await update($, agents, list =>
@@ -228,17 +274,33 @@ export const register: Register = on => {
     const hasWorked = ran.deny === undefined && ran.isError !== true
     if (kind !== undefined && path !== undefined && hasWorked) {
       const doneAt = await $.clock.now()
+      const before = (await read($, files)).find(f => f.path === path)
       await update($, files, list => {
         const found = list.find(f => f.path === path)
-        const base: FileTouch = found ?? { path, agentIds: [], reads: 0, edits: 0, writes: 0, lastAt: doneAt }
+        const base: FileTouch = found ?? {
+          path,
+          agentIds: [],
+          editorIds: [],
+          reads: 0,
+          edits: 0,
+          writes: 0,
+          lastAt: doneAt,
+        }
+        const isEdit = kind !== 'reads'
         const touched: FileTouch = {
           ...base,
           agentIds: base.agentIds.includes(id) ? base.agentIds : [...base.agentIds, id],
+          editorIds: !isEdit || base.editorIds.includes(id) ? base.editorIds : [...base.editorIds, id],
           [kind]: base[kind] + 1,
           lastAt: doneAt,
         }
         return found ? list.map(f => (f.path === path ? touched : f)) : [...list, touched].slice(-200)
       })
+      // A second agent changing the same file: said once, when it begins.
+      const after = (await read($, files)).find(f => f.path === path)
+      if (after !== undefined && isConflict(after) && !(before !== undefined && isConflict(before))) {
+        $.ui.toast(`⚠ ${fileName(path)} wird von ${after.editorIds.length} Agenten geändert`)
+      }
     }
 
     return ran
@@ -260,6 +322,13 @@ export const register: Register = on => {
         .filter(a => a.id !== id || a.isSpawned)
         .map(a => (a.id === id ? { ...a, status, endedAt: at, running: [] } : a)),
     )
+    const ended = (await read($, agents)).find(a => a.id === id)
+    if (ended !== undefined && id !== MAIN) {
+      const said = status === 'done' ? 'fertig' : WORD[status]
+      $.ui.toast(`${GLYPH[status]} ${agentName(ended)} ${said} (${elapsed(ended, at)})`)
+      if (hasSound) void $.audio.play({ asset: 'sounds/done.wav' }).catch(() => undefined)
+    }
+    await showStatus($)
 
     return next(e)
   })
@@ -273,6 +342,8 @@ export const register: Register = on => {
     const touched = await read($, files)
     const shown = await read($, tab)
     const at = await read($, now)
+    const runs = await read($, history)
+    const opened = await read($, expanded)
     const rows = ordered(list)
 
     const logo = (agent: Agent, size: 'big' | 'small') =>
@@ -281,12 +352,53 @@ export const register: Register = on => {
       ) : (
         <Svg
           source={logoSvg(agent.color)}
-          alt={agent.id === MAIN ? 'Hauptagent' : agent.label || 'Subagent'}
+          alt={agentName(agent)}
           width={size === 'big' ? 24 : 14}
           height={size === 'big' ? 14 : 8}
         />
       )
 
+    const agentRow = (agent: Agent, depth: number, fileList: readonly FileTouch[], key: string) => {
+      const changedFiles = fileList.filter(f => f.agentIds.includes(agent.id) && isChanged(f)).length
+
+      return (
+        <Box key={key} flexDirection="column" paddingLeft={depth * 2}>
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            {logo(agent, 'big')}
+            <Text wrap="truncate-end">
+              <Text color={COLOR[agent.status]}>{GLYPH[agent.status]} </Text>
+              <Text bold>{agentName(agent)}</Text>
+              {agent.type !== '' && <Text dimColor> · {agent.type}</Text>}
+            </Text>
+          </Box>
+          <Text dimColor wrap="truncate-end">
+            {'  '}
+            {WORD[agent.status]} · {elapsed(agent, at)} · {agent.calls} {agent.calls === 1 ? 'Tool' : 'Tools'}
+            {changedFiles > 0 && ` · ${changedFiles} ${changedFiles === 1 ? 'Datei' : 'Dateien'} geändert`}
+          </Text>
+          {agent.running.map(call => {
+            // A call running longer than the set limit may be stuck.
+            const isStalled = stallMs > 0 && at - call.startedAt >= stallMs
+
+            return (
+              <Text wrap="truncate-end">
+                {'  ▸ '}
+                <Text color={isStalled ? 'warning' : 'claude'}>{call.tool}</Text>
+                {call.detail !== '' && <Text dimColor> {call.detail}</Text>}
+                {isStalled && <Text color="warning"> ⏳ seit {clock(at - call.startedAt)}</Text>}
+              </Text>
+            )
+          })}
+          {agent.status === 'running' && agent.running.length === 0 && (
+            <Text dimColor italic>
+              {'  '}denkt nach …
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const conflicts = touched.filter(isConflict).length
     const tabs = (
       <Box flexDirection="row" gap={1}>
         <Button
@@ -297,7 +409,7 @@ export const register: Register = on => {
         />
         <Button
           key="tab-files"
-          label={`Dateien (${touched.length})`}
+          label={`Dateien (${touched.length})${conflicts > 0 ? ' ⚠' : ''}`}
           variant={shown === 'files' ? 'primary' : 'secondary'}
           onPress={() => update($, tab, () => 'files')}
         />
@@ -306,9 +418,12 @@ export const register: Register = on => {
 
     if (shown === 'files') {
       const byId = new Map(list.map(a => [a.id, a]))
-      // Changed files first, then the most recently touched.
+      // Conflicts first, then changed files, then the most recently touched.
       const sorted = [...touched].sort(
-        (a, b) => Number(b.edits + b.writes > 0) - Number(a.edits + a.writes > 0) || b.lastAt - a.lastAt,
+        (a, b) =>
+          Number(isConflict(b)) - Number(isConflict(a)) ||
+          Number(isChanged(b)) - Number(isChanged(a)) ||
+          b.lastAt - a.lastAt,
       )
 
       return (
@@ -316,21 +431,23 @@ export const register: Register = on => {
           {tabs}
           {sorted.length === 0 && <Text dimColor>Seit dem letzten Prompt wurde keine Datei angefasst.</Text>}
           {sorted.map(file => {
-            const changed = file.edits + file.writes > 0
+            const changed = isChanged(file)
+            const conflict = isConflict(file)
             const parts = [
               file.writes > 0 ? `${file.writes}× geschrieben` : '',
               file.edits > 0 ? `${file.edits}× bearbeitet` : '',
               file.reads > 0 ? `${file.reads}× gelesen` : '',
             ].filter(part => part !== '')
-            const name = file.path.split('/').pop() ?? file.path
             const folder = file.path.split('/').slice(-3, -1).join('/')
 
             return (
               <Box key={file.path} flexDirection="column">
                 <Box flexDirection="row" alignItems="center" gap={1}>
-                  <Text color={changed ? 'warning' : 'inactive'}>{changed ? '✎' : '·'}</Text>
-                  <Text bold={changed} wrap="truncate-end">
-                    {name}
+                  <Text color={conflict ? 'error' : changed ? 'warning' : 'inactive'}>
+                    {conflict ? '⚠' : changed ? '✎' : '·'}
+                  </Text>
+                  <Text bold={changed} color={conflict ? 'error' : undefined} wrap="truncate-end">
+                    {fileName(file.path)}
                     {folder !== '' && <Text dimColor> {folder}/</Text>}
                   </Text>
                 </Box>
@@ -341,6 +458,11 @@ export const register: Register = on => {
                   })}
                   <Text dimColor wrap="truncate-end">{parts.join(' · ')}</Text>
                 </Box>
+                {conflict && (
+                  <Text color="error" wrap="truncate-end">
+                    {'  '}Konflikt: {file.editorIds.length} Agenten haben diese Datei geändert
+                  </Text>
+                )}
               </Box>
             )
           })}
@@ -352,37 +474,34 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {tabs}
         {rows.length === 0 && <Text dimColor>Noch keine Aktivität.</Text>}
-        {rows.map(({ agent, depth }) => {
-          const changedFiles = touched.filter(f => f.agentIds.includes(agent.id) && f.edits + f.writes > 0).length
+        {rows.map(({ agent, depth }) => agentRow(agent, depth, touched, agent.id))}
+        {runs.length > 0 && (
+          <Text dimColor bold>
+            Frühere Prompts
+          </Text>
+        )}
+        {runs.map(run => {
+          const isOpen = opened.includes(run.id)
+          const runRows = ordered(run.agents)
+          const main = run.agents.find(a => a.id === MAIN)
+          const changed = run.files.filter(isChanged).length
+          const summary = [
+            `${runRows.length} ${runRows.length === 1 ? 'Agent' : 'Agenten'}`,
+            changed > 0 ? `${changed} ${changed === 1 ? 'Datei' : 'Dateien'} geändert` : '',
+            main !== undefined ? elapsed(main, at) : '',
+          ].filter(part => part !== '')
 
           return (
-            <Box key={agent.id} flexDirection="column" paddingLeft={depth * 2}>
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                {logo(agent, 'big')}
-                <Text wrap="truncate-end">
-                  <Text color={COLOR[agent.status]}>{GLYPH[agent.status]} </Text>
-                  <Text bold>{agent.id === MAIN ? 'Hauptagent' : agent.label || 'Subagent'}</Text>
-                  {agent.type !== '' && <Text dimColor> · {agent.type}</Text>}
-                </Text>
-              </Box>
-              <Text dimColor wrap="truncate-end">
-                {'  '}
-                {WORD[agent.status]} · {elapsed(agent, at)} · {agent.calls}{' '}
-                {agent.calls === 1 ? 'Tool' : 'Tools'}
-                {changedFiles > 0 && ` · ${changedFiles} ${changedFiles === 1 ? 'Datei' : 'Dateien'} geändert`}
-              </Text>
-              {agent.running.map(call => (
-                <Text wrap="truncate-end">
-                  {'  ▸ '}
-                  <Text color="claude">{call.tool}</Text>
-                  {call.detail !== '' && <Text dimColor> {call.detail}</Text>}
-                </Text>
-              ))}
-              {agent.status === 'running' && agent.running.length === 0 && (
-                <Text dimColor italic>
-                  {'  '}denkt nach …
-                </Text>
-              )}
+            <Box key={run.id} flexDirection="column">
+              <Button
+                key={run.id}
+                label={`${isOpen ? '▾' : '▸'} „${run.prompt || '…'}“ · ${summary.join(' · ')}`}
+                variant="secondary"
+                onPress={() =>
+                  update($, expanded, ids => (ids.includes(run.id) ? ids.filter(id => id !== run.id) : [...ids, run.id]))
+                }
+              />
+              {isOpen && runRows.map(({ agent, depth }) => agentRow(agent, depth + 1, run.files, `${run.id}-${agent.id}`))}
             </Box>
           )
         })}

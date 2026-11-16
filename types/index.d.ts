@@ -1,7 +1,7 @@
 export type Status = 'running' | 'idle' | 'done' | 'failed' | 'aborted'
 
 /** A tool call an agent is running right now. */
-export type Call = { id: string; tool: string; detail: string }
+export type Call = { id: string; tool: string; detail: string; startedAt: number }
 
 /** One agent loop: the main one (id `main`) or a subagent. */
 export type Agent = {
@@ -25,6 +25,8 @@ export type FileTouch = {
   path: string
   /** The agents that touched it, in the order they first did. */
   agentIds: string[]
+  /** The agents that edited or wrote it: two or more is a conflict. */
+  editorIds: string[]
   reads: number
   edits: number
   writes: number
@@ -33,8 +35,24 @@ export type FileTouch = {
 
 export type Tab = 'agents' | 'files'
 
+/** An earlier prompt, kept as its agents and files stood when the next one began. */
+export type Run = {
+  id: string
+  prompt: string
+  agents: Agent[]
+  files: FileTouch[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'agent-monitor': { agents: Shaped<Agent[]>; files: Shaped<FileTouch[]>; tab: Tab; now: number }
+    'agent-monitor': {
+      agents: Shaped<Agent[]>
+      files: Shaped<FileTouch[]>
+      history: Shaped<Run[]>
+      prompt: string
+      expanded: string[]
+      tab: Tab
+      now: number
+    }
   }
 }

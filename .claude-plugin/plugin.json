@@ -1,7 +1,27 @@
 {
   "name": "agent-monitor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Panel neben dem Chat, das live zeigt, was Hauptagent und Subagenten gerade tun",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "sound": {
+      "type": "boolean",
+      "title": "Ton bei fertigen Subagenten",
+      "description": "Spielt einen kurzen Ton, wenn ein Subagent fertig ist oder scheitert",
+      "default": false
+    },
+    "historySize": {
+      "type": "number",
+      "title": "Frühere Prompts im Panel",
+      "description": "Wie viele frühere Prompts einklappbar stehen bleiben (0 = keine)",
+      "default": 5
+    },
+    "stallSeconds": {
+      "type": "number",
+      "title": "Hängt nach (Sekunden)",
+      "description": "Ab wann ein laufender Tool-Aufruf gelb als möglicherweise hängend markiert wird (0 = nie)",
+      "default": 120
+    }
+  }
 }
