@@ -20,8 +20,21 @@ export type Agent = {
   running: Call[]
 }
 
+/** A file the agents touched since the last prompt, and how. */
+export type FileTouch = {
+  path: string
+  /** The agents that touched it, in the order they first did. */
+  agentIds: string[]
+  reads: number
+  edits: number
+  writes: number
+  lastAt: number
+}
+
+export type Tab = 'agents' | 'files'
+
 declare module 'claude-code' {
   interface PluginState {
-    'agent-monitor': { agents: Shaped<Agent[]>; now: number }
+    'agent-monitor': { agents: Shaped<Agent[]>; files: Shaped<FileTouch[]>; tab: Tab; now: number }
   }
 }

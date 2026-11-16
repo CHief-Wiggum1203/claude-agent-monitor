@@ -5,7 +5,8 @@ Ein Claude-Code-Mod: ein Panel **„Agenten live“** neben dem Chat, das live z
 - Hauptagent und Subagenten als Baum, jeder mit eigenem farbigem Pixel-Logo
 - Status (läuft, fertig, Fehler, abgebrochen, wartet), Laufzeit und Anzahl Tool-Aufrufe
 - die gerade laufenden Tools mit kurzem Detail (Befehl, Datei, Suchmuster)
-- fertige Subagenten verschwinden beim nächsten Prompt
+- Reiter **Dateien**: jede Datei, die seit dem letzten Prompt gelesen, bearbeitet oder geschrieben wurde, mit den Logos der Agenten, die sie angefasst haben; geänderte Dateien zuerst, abgelehnte oder fehlgeschlagene Aufrufe zählen nicht
+- fertige Subagenten und die Dateiliste fangen beim nächsten Prompt von vorn an
 - `/agenten` öffnet das Panel wieder
 
 Braucht Claude Code 2.1.325 oder neuer.

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, StateDollar, ToolCallInput } from 'claude-code'
 
-import type { Agent, Call, Status } from '../types'
+import type { Agent, Call, FileTouch, Status } from '../types'
 
 const PANE = 'agent-monitor'
 const TITLE = 'Agenten live'
@@ -38,6 +38,26 @@ function freeColor(list: readonly Agent[]) {
   const used = new Set(list.map(a => a.color))
   return PALETTE.slice(1).find(c => !used.has(c)) ?? PALETTE[1 + (list.length % (PALETTE.length - 1))] ?? '#4C8DF6'
 }
+const files = atom({ plugin: 'agent-monitor', key: 'files' } as const, [], {
+  shape: 'files-1',
+})
+const tab = atom({ plugin: 'agent-monitor', key: 'tab' } as const, 'agents')
+
+// How each file tool touches its file.
+const FILE_TOOLS: Record<string, 'reads' | 'edits' | 'writes'> = {
+  Read: 'reads',
+  Edit: 'edits',
+  MultiEdit: 'edits',
+  NotebookEdit: 'edits',
+  Write: 'writes',
+}
+
+function touchedPath(e: ToolCallInput): string | undefined {
+  const fields = e as unknown as Record<string, unknown>
+  const path = fields.file_path ?? fields.notebook_path
+  return typeof path === 'string' && path !== '' ? path : undefined
+}
+
 // The time the pane counts elapsed seconds against, ticked while anything runs.
 const now = atom({ plugin: 'agent-monitor', key: 'now' } as const, 0)
 
@@ -166,6 +186,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       // A new prompt: the subagents that finished before it leave the pane.
       await update($, agents, list => list.filter(a => a.id === MAIN || a.status === 'running'))
+      await update($, files, () => [])
       await upsert($, MAIN, at, a => ({ ...a, status: 'running', startedAt: at, endedAt: null, calls: 0, running: [] }))
     } else {
       await upsert($, e.agentId, at, a => ({ ...a, status: 'running', endedAt: null }))
@@ -201,6 +222,24 @@ export const register: Register = on => {
     await update($, agents, list =>
       list.map(a => (a.id === id ? { ...a, running: a.running.filter(c => c.id !== call.id) } : a)),
     )
+    const kind = FILE_TOOLS[e.tool]
+    const path = touchedPath(e)
+    // Counted once the call went through: a refused or failed write touched nothing.
+    const hasWorked = ran.deny === undefined && ran.isError !== true
+    if (kind !== undefined && path !== undefined && hasWorked) {
+      const doneAt = await $.clock.now()
+      await update($, files, list => {
+        const found = list.find(f => f.path === path)
+        const base: FileTouch = found ?? { path, agentIds: [], reads: 0, edits: 0, writes: 0, lastAt: doneAt }
+        const touched: FileTouch = {
+          ...base,
+          agentIds: base.agentIds.includes(id) ? base.agentIds : [...base.agentIds, id],
+          [kind]: base[kind] + 1,
+          lastAt: doneAt,
+        }
+        return found ? list.map(f => (f.path === path ? touched : f)) : [...list, touched].slice(-200)
+      })
+    }
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -227,51 +266,126 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
-    const { Box, Text } = table
+    const { Box, Button, Text } = table
     // The terminal draws no Svg: there the logo is a colored glyph.
     const Svg = 'Svg' in table ? table.Svg : undefined
-    const rows = ordered(await read($, agents))
+    const list = await read($, agents)
+    const touched = await read($, files)
+    const shown = await read($, tab)
     const at = await read($, now)
+    const rows = ordered(list)
 
-    if (rows.length === 0) {
-      return <Text dimColor>Noch keine Aktivität.</Text>
+    const logo = (agent: Agent, size: 'big' | 'small') =>
+      Svg === undefined ? (
+        <Text color={agent.color}>{size === 'big' ? '▟█▙' : '■'}</Text>
+      ) : (
+        <Svg
+          source={logoSvg(agent.color)}
+          alt={agent.id === MAIN ? 'Hauptagent' : agent.label || 'Subagent'}
+          width={size === 'big' ? 24 : 14}
+          height={size === 'big' ? 14 : 8}
+        />
+      )
+
+    const tabs = (
+      <Box flexDirection="row" gap={1}>
+        <Button
+          key="tab-agents"
+          label={`Agenten (${rows.length})`}
+          variant={shown === 'agents' ? 'primary' : 'secondary'}
+          onPress={() => update($, tab, () => 'agents')}
+        />
+        <Button
+          key="tab-files"
+          label={`Dateien (${touched.length})`}
+          variant={shown === 'files' ? 'primary' : 'secondary'}
+          onPress={() => update($, tab, () => 'files')}
+        />
+      </Box>
+    )
+
+    if (shown === 'files') {
+      const byId = new Map(list.map(a => [a.id, a]))
+      // Changed files first, then the most recently touched.
+      const sorted = [...touched].sort(
+        (a, b) => Number(b.edits + b.writes > 0) - Number(a.edits + a.writes > 0) || b.lastAt - a.lastAt,
+      )
+
+      return (
+        <Box flexDirection="column" gap={1}>
+          {tabs}
+          {sorted.length === 0 && <Text dimColor>Seit dem letzten Prompt wurde keine Datei angefasst.</Text>}
+          {sorted.map(file => {
+            const changed = file.edits + file.writes > 0
+            const parts = [
+              file.writes > 0 ? `${file.writes}× geschrieben` : '',
+              file.edits > 0 ? `${file.edits}× bearbeitet` : '',
+              file.reads > 0 ? `${file.reads}× gelesen` : '',
+            ].filter(part => part !== '')
+            const name = file.path.split('/').pop() ?? file.path
+            const folder = file.path.split('/').slice(-3, -1).join('/')
+
+            return (
+              <Box key={file.path} flexDirection="column">
+                <Box flexDirection="row" alignItems="center" gap={1}>
+                  <Text color={changed ? 'warning' : 'inactive'}>{changed ? '✎' : '·'}</Text>
+                  <Text bold={changed} wrap="truncate-end">
+                    {name}
+                    {folder !== '' && <Text dimColor> {folder}/</Text>}
+                  </Text>
+                </Box>
+                <Box flexDirection="row" alignItems="center" gap={1} paddingLeft={2}>
+                  {file.agentIds.map(id => {
+                    const agent = byId.get(id)
+                    return agent === undefined ? null : logo(agent, 'small')
+                  })}
+                  <Text dimColor wrap="truncate-end">{parts.join(' · ')}</Text>
+                </Box>
+              </Box>
+            )
+          })}
+        </Box>
+      )
     }
 
     return (
       <Box flexDirection="column" gap={1}>
-        {rows.map(({ agent, depth }) => (
-          <Box key={agent.id} flexDirection="column" paddingLeft={depth * 2}>
-            <Box flexDirection="row" alignItems="center" gap={1}>
-              {Svg === undefined ? (
-                <Text color={agent.color}>▟█▙</Text>
-              ) : (
-                <Svg source={logoSvg(agent.color)} alt="Agent-Logo" width={24} height={14} />
+        {tabs}
+        {rows.length === 0 && <Text dimColor>Noch keine Aktivität.</Text>}
+        {rows.map(({ agent, depth }) => {
+          const changedFiles = touched.filter(f => f.agentIds.includes(agent.id) && f.edits + f.writes > 0).length
+
+          return (
+            <Box key={agent.id} flexDirection="column" paddingLeft={depth * 2}>
+              <Box flexDirection="row" alignItems="center" gap={1}>
+                {logo(agent, 'big')}
+                <Text wrap="truncate-end">
+                  <Text color={COLOR[agent.status]}>{GLYPH[agent.status]} </Text>
+                  <Text bold>{agent.id === MAIN ? 'Hauptagent' : agent.label || 'Subagent'}</Text>
+                  {agent.type !== '' && <Text dimColor> · {agent.type}</Text>}
+                </Text>
+              </Box>
+              <Text dimColor wrap="truncate-end">
+                {'  '}
+                {WORD[agent.status]} · {elapsed(agent, at)} · {agent.calls}{' '}
+                {agent.calls === 1 ? 'Tool' : 'Tools'}
+                {changedFiles > 0 && ` · ${changedFiles} ${changedFiles === 1 ? 'Datei' : 'Dateien'} geändert`}
+              </Text>
+              {agent.running.map(call => (
+                <Text wrap="truncate-end">
+                  {'  ▸ '}
+                  <Text color="claude">{call.tool}</Text>
+                  {call.detail !== '' && <Text dimColor> {call.detail}</Text>}
+                </Text>
+              ))}
+              {agent.status === 'running' && agent.running.length === 0 && (
+                <Text dimColor italic>
+                  {'  '}denkt nach …
+                </Text>
               )}
-              <Text wrap="truncate-end">
-                <Text color={COLOR[agent.status]}>{GLYPH[agent.status]} </Text>
-                <Text bold>{agent.id === MAIN ? 'Hauptagent' : agent.label || 'Subagent'}</Text>
-                {agent.type !== '' && <Text dimColor> · {agent.type}</Text>}
-              </Text>
             </Box>
-            <Text dimColor wrap="truncate-end">
-              {'  '}
-              {WORD[agent.status]} · {elapsed(agent, at)} · {agent.calls}{' '}
-              {agent.calls === 1 ? 'Tool' : 'Tools'}
-            </Text>
-            {agent.running.map(call => (
-              <Text wrap="truncate-end">
-                {'  ▸ '}
-                <Text color="claude">{call.tool}</Text>
-                {call.detail !== '' && <Text dimColor> {call.detail}</Text>}
-              </Text>
-            ))}
-            {agent.status === 'running' && agent.running.length === 0 && (
-              <Text dimColor italic>
-                {'  '}denkt nach …
-              </Text>
-            )}
-          </Box>
-        ))}
+          )
+        })}
       </Box>
     )
   })

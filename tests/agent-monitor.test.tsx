@@ -94,3 +94,57 @@ test('the pane says so before anything ran', async ($, on) => {
   expect((await ui.find({ type: 'Text' }))?.text).toBe('Noch keine Aktivität.')
   await ui.unmount()
 })
+
+test('the files tab lists what the agents touched, changed files first', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+
+  await $.turn.start({ text: 'los', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/auth/login.ts' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/auth/login.ts' })
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/src/auth/session.ts', old_string: 'a', new_string: 'b' })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /1 Datei geändert/ }))?.text).toBe('  läuft · 0:00 · 3 Tools · 1 Datei geändert')
+    await ui.press({ key: 'tab-files' })
+    const first = await ui.find({ type: 'Text', text: /\.ts/ })
+    expect(first?.text).toBe('session.ts src/auth/')
+    expect((await ui.find({ type: 'Text', text: /bearbeitet/ }))?.text).toBe('1× bearbeitet')
+    expect((await ui.find({ type: 'Text', text: /gelesen/ }))?.text).toBe('2× gelesen')
+    await ui.press({ key: 'tab-agents' })
+    await ui.unmount()
+  }
+
+  // A new prompt starts the list over.
+  await $.turn.start({ text: 'weiter', turnId: 't2' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tab-files' })
+  expect((await ui.find({ type: 'Text', text: /keine Datei/ }))?.text).toBe('Seit dem letzten Prompt wurde keine Datei angefasst.')
+  await ui.unmount()
+})
+
+test('a refused or failed file call is not counted as touching the file', async ($, on) => {
+  mock.clock(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', (_, e) =>
+    e.tool === 'Write'
+      ? { deny: 'no summary files' }
+      : e.tool === 'Edit'
+        ? { result: {}, isError: true, text: 'old_string not found' }
+        : { result: {} },
+  )
+
+  await $.turn.start({ text: 'los', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: '/repo/summary.md', content: 'x' })
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/notes.md', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/login.ts' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tab-files' })
+  expect(await ui.find({ type: 'Text', text: /summary\.md/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /notes\.md/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /login\.ts/ }))?.text).toBe('login.ts /repo/')
+  await ui.unmount()
+})
