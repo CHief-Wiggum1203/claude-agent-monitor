@@ -6,6 +6,8 @@ import type { Agent, Call, Change, FileTouch, Run, Status } from '../types'
 const PANE = 'agent-monitor'
 const TITLE = 'Agenten live'
 const MAIN = 'main'
+// Agents shown in the widget before "+ N weitere".
+const WIDGET_ROWS = 4
 
 // Change the tag when Agent's fields change: it declines what an earlier
 // version stored, which outlives a reload.
@@ -232,7 +234,8 @@ export const register: Register = (on, options) => {
       name: 'agenten',
       description: 'Öffnet das Panel mit den laufenden Agenten und Subagenten',
     })
-    void $.ui.open({ id: PANE, title: TITLE })
+    // On the desktop app a small widget instead of a whole column; /agenten opens it full.
+    void $.ui.open({ id: PANE, title: TITLE, placement: 'widget' })
     $.clock.every(1000, async () => {
       const list = await read($, agents)
       if (list.some(a => a.status === 'running')) {
@@ -435,6 +438,44 @@ export const register: Register = (on, options) => {
     }
 
     const conflicts = touched.filter(isConflict).length
+
+    // The widget: one line per agent, readable at a glance, nothing to click.
+    if (e.props.placement === 'widget') {
+      const glance = rows.slice(0, WIDGET_ROWS)
+      const more = rows.length - glance.length
+
+      return (
+        <Box flexDirection="column">
+          {glance.length === 0 && <Text dimColor>Noch keine Aktivität.</Text>}
+          {glance.map(({ agent }) => {
+            const call = agent.running[agent.running.length - 1]
+            const doing =
+              call !== undefined ? call.tool : agent.status === 'running' ? 'denkt nach …' : WORD[agent.status]
+
+            return (
+              <Box key={agent.id} flexDirection="row" alignItems="center" gap={1}>
+                {logo(agent, 'small')}
+                <Text wrap="truncate-end">
+                  <Text color={COLOR[agent.status]}>{GLYPH[agent.status]} </Text>
+                  <Text bold>{agentName(agent)}</Text>
+                  <Text dimColor>
+                    {' '}
+                    · {elapsed(agent, at)} · {doing}
+                  </Text>
+                </Text>
+              </Box>
+            )
+          })}
+          {more > 0 && <Text dimColor>+ {more} weitere</Text>}
+          {conflicts > 0 && (
+            <Text color="error">
+              ⚠ {conflicts} {conflicts === 1 ? 'Datei' : 'Dateien'} im Konflikt
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
     const tabs = (
       <Box flexDirection="row" gap={1}>
         <Button

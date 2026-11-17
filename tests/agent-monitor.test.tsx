@@ -352,3 +352,38 @@ test('a press on Diff opens what the agents changed in a file, line by line', as
     await ui.unmount()
   }
 })
+
+test('it starts as a widget showing one line per agent, nothing to click', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  const opens: unknown[] = []
+  on('command.register', () => ({ value: { command: 'agenten' } }))
+  on('ui.open', (_, e) => {
+    opens.push(e)
+    return { value: { isPlaced: true } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  let release = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  on('tool.call', async () => {
+    await gate
+    return { result: {} }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(opens).toEqual([expect.objectContaining({ id: 'agent-monitor', placement: 'widget' })])
+
+  await $.turn.start({ text: 'los', turnId: 't1' })
+  const call = $.tool.call({ tool: 'Bash', command: 'npm test' })
+  await clock.advance(7_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, placement: 'widget' } })
+  expect((await ui.find({ type: 'Text', text: /Hauptagent/ }))?.text).toBe('● Hauptagent · 0:07 · Bash')
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  await ui.unmount()
+
+  release()
+  await call
+})
