@@ -20,6 +20,16 @@ export type Agent = {
   running: Call[]
 }
 
+/** One change an agent made to a file, as the tool call stated it. */
+export type Change = {
+  agentId: string
+  kind: 'edit' | 'write'
+  removed: string[]
+  added: string[]
+  /** Whether lines were left out to keep the change short. */
+  isCut: boolean
+}
+
 /** A file the agents touched since the last prompt, and how. */
 export type FileTouch = {
   path: string
@@ -31,6 +41,8 @@ export type FileTouch = {
   edits: number
   writes: number
   lastAt: number
+  /** The latest changes, oldest first. */
+  changes: Change[]
 }
 
 export type Tab = 'agents' | 'files'
@@ -51,6 +63,7 @@ declare module 'claude-code' {
       history: Shaped<Run[]>
       prompt: string
       expanded: string[]
+      openDiffs: string[]
       tab: Tab
       now: number
     }

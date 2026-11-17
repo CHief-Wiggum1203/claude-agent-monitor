@@ -316,3 +316,39 @@ test('with the sound on, a finished subagent plays it', { options: { sound: true
   await $.turn.complete({ answer: 'ok', durationMs: 1, isAborted: false, turnId: 't2', agentId: 'a1', reason: 'answer' })
   expect(played).toEqual(['sounds/done.wav'])
 })
+
+test('a press on Diff opens what the agents changed in a file, line by line', async ($, on) => {
+  mock.clock(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
+
+  await $.turn.start({ text: 'los', turnId: 't1' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/readme.md' })
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/auth.ts', old_string: 'const a = 1', new_string: 'const a = 2\nconst b = 3' })
+  await $.tool.call({ tool: 'Write', file_path: '/repo/big.txt', content: Array.from({ length: 40 }, (_, i) => `z${i}`).join('\n') })
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab-files' })
+    // A file only read has nothing to show.
+    expect(await ui.find({ key: 'diff-/repo/readme.md' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^- const a/ })).toBeUndefined()
+
+    await ui.press({ key: 'diff-/repo/auth.ts' })
+    expect((await ui.find({ key: 'diff-/repo/auth.ts' }))?.text).toBe('Diff ▾')
+    expect((await ui.find({ type: 'Text', text: /^bearbeitet von/ }))?.text).toBe('bearbeitet von Hauptagent')
+    expect((await ui.find({ type: 'Text', text: /^- / }))?.text).toBe('- const a = 1')
+    expect((await ui.find({ type: 'Text', text: /^\+ const b/ }))?.text).toBe('+ const b = 3')
+
+    await ui.press({ key: 'diff-/repo/big.txt' })
+    expect((await ui.find({ type: 'Text', text: /^\+ z29$/ }))?.text).toBe('+ z29')
+    expect(await ui.find({ type: 'Text', text: /^\+ z30$/ })).toBeUndefined()
+    expect((await ui.find({ type: 'Text', text: /gekürzt/ }))?.text).toBe('… gekürzt')
+
+    await ui.press({ key: 'diff-/repo/auth.ts' })
+    await ui.press({ key: 'diff-/repo/big.txt' })
+    expect(await ui.find({ type: 'Text', text: /^- / })).toBeUndefined()
+    await ui.press({ key: 'tab-agents' })
+    await ui.unmount()
+  }
+})

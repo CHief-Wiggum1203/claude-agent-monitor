@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, StateDollar, ToolCallInput } from 'claude-code'
 
-import type { Agent, Call, FileTouch, Run, Status } from '../types'
+import type { Agent, Call, Change, FileTouch, Run, Status } from '../types'
 
 const PANE = 'agent-monitor'
 const TITLE = 'Agenten live'
@@ -39,8 +39,10 @@ function freeColor(list: readonly Agent[]) {
   return PALETTE.slice(1).find(c => !used.has(c)) ?? PALETTE[1 + (list.length % (PALETTE.length - 1))] ?? '#4C8DF6'
 }
 const files = atom({ plugin: 'agent-monitor', key: 'files' } as const, [], {
-  shape: 'files-2',
+  shape: 'files-3',
 })
+// The files whose changes are opened in the files tab.
+const openDiffs = atom({ plugin: 'agent-monitor', key: 'openDiffs' } as const, [])
 const tab = atom({ plugin: 'agent-monitor', key: 'tab' } as const, 'agents')
 // Earlier prompts, newest first, and the one running now.
 const history = atom({ plugin: 'agent-monitor', key: 'history' } as const, [], {
@@ -63,6 +65,37 @@ function touchedPath(e: ToolCallInput): string | undefined {
   const fields = e as unknown as Record<string, unknown>
   const path = fields.file_path ?? fields.notebook_path
   return typeof path === 'string' && path !== '' ? path : undefined
+}
+
+// Lines kept per side of one change, and changes kept per file.
+const MAX_LINES = 30
+const MAX_CHANGES = 20
+
+const linesOf = (text: unknown) => (typeof text === 'string' && text !== '' ? text.split('\n') : [])
+
+/** What one successful file call changed, from its own input. */
+function changesOf(e: ToolCallInput, agentId: string): Change[] {
+  const fields = e as unknown as Record<string, unknown>
+  const pairs: [unknown, unknown][] =
+    e.tool === 'Write'
+      ? [[undefined, fields.content]]
+      : e.tool === 'NotebookEdit'
+        ? [[undefined, fields.new_source]]
+        : Array.isArray(fields.edits)
+          ? (fields.edits as Record<string, unknown>[]).map(edit => [edit.old_string, edit.new_string])
+          : [[fields.old_string, fields.new_string]]
+
+  return pairs.map(([before, after]) => {
+    const removed = linesOf(before)
+    const added = linesOf(after)
+    return {
+      agentId,
+      kind: e.tool === 'Write' ? 'write' : 'edit',
+      removed: removed.slice(0, MAX_LINES),
+      added: added.slice(0, MAX_LINES),
+      isCut: removed.length > MAX_LINES || added.length > MAX_LINES,
+    }
+  })
 }
 
 // The time the pane counts elapsed seconds against, ticked while anything runs.
@@ -285,6 +318,7 @@ export const register: Register = (on, options) => {
           edits: 0,
           writes: 0,
           lastAt: doneAt,
+          changes: [],
         }
         const isEdit = kind !== 'reads'
         const touched: FileTouch = {
@@ -293,6 +327,7 @@ export const register: Register = (on, options) => {
           editorIds: !isEdit || base.editorIds.includes(id) ? base.editorIds : [...base.editorIds, id],
           [kind]: base[kind] + 1,
           lastAt: doneAt,
+          changes: isEdit ? [...base.changes, ...changesOf(e, id)].slice(-MAX_CHANGES) : base.changes,
         }
         return found ? list.map(f => (f.path === path ? touched : f)) : [...list, touched].slice(-200)
       })
@@ -344,6 +379,7 @@ export const register: Register = (on, options) => {
     const at = await read($, now)
     const runs = await read($, history)
     const opened = await read($, expanded)
+    const diffs = await read($, openDiffs)
     const rows = ordered(list)
 
     const logo = (agent: Agent, size: 'big' | 'small') =>
@@ -457,7 +493,42 @@ export const register: Register = (on, options) => {
                     return agent === undefined ? null : logo(agent, 'small')
                   })}
                   <Text dimColor wrap="truncate-end">{parts.join(' · ')}</Text>
+                  {file.changes.length > 0 && (
+                    <Button
+                      key={`diff-${file.path}`}
+                      label={diffs.includes(file.path) ? 'Diff ▾' : 'Diff ▸'}
+                      variant="secondary"
+                      onPress={() =>
+                        update($, openDiffs, paths =>
+                          paths.includes(file.path) ? paths.filter(p => p !== file.path) : [...paths, file.path],
+                        )
+                      }
+                    />
+                  )}
                 </Box>
+                {diffs.includes(file.path) &&
+                  file.changes.map(change => {
+                    const by = byId.get(change.agentId)
+                    return (
+                      <Box flexDirection="column" paddingLeft={2}>
+                        <Text dimColor wrap="truncate-end">
+                          {change.kind === 'write' ? 'geschrieben' : 'bearbeitet'} von{' '}
+                          {by === undefined ? 'Agent' : agentName(by)}
+                        </Text>
+                        {change.removed.map(line => (
+                          <Text color="error" wrap="truncate-end">
+                            - {line}
+                          </Text>
+                        ))}
+                        {change.added.map(line => (
+                          <Text color="success" wrap="truncate-end">
+                            + {line}
+                          </Text>
+                        ))}
+                        {change.isCut && <Text dimColor>… gekürzt</Text>}
+                      </Box>
+                    )
+                  })}
                 {conflict && (
                   <Text color="error" wrap="truncate-end">
                     {'  '}Konflikt: {file.editorIds.length} Agenten haben diese Datei geändert
