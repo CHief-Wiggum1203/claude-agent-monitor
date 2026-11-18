@@ -13,6 +13,7 @@ Ein Claude-Code-Mod: ein Panel **„Agenten live“** neben dem Chat, das live z
 - **Verlauf:** die letzten Prompts bleiben einklappbar unter „Frühere Prompts“ stehen, mit ihren Agenten und Dateien
 - **Hängt-Erkennung:** ein Tool-Aufruf, der zu lange läuft, wird gelb mit „⏳ seit 2:05“ markiert
 - in der Desktop-App startet es als kleines **Widget** (eine Zeile pro Agent), ein Klick vergrößert es zum vollen Panel
+- oben im Widget und im Panel steht, wie voll der Kontext ist: `Kontext ███████░░░░░ 62 % · 246.9k / 400k` (ab der ersten Antwort der Session)
 - `/agenten` öffnet das Panel wieder
 
 ## Einstellungen

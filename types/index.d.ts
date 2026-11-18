@@ -47,6 +47,9 @@ export type FileTouch = {
 
 export type Tab = 'agents' | 'files'
 
+/** The context window's fill: input tokens of the last response against the window. */
+export type Fill = { tokens: number; window: number; percent: number }
+
 /** An earlier prompt, kept as its agents and files stood when the next one began. */
 export type Run = {
   id: string
@@ -66,6 +69,7 @@ declare module 'claude-code' {
       openDiffs: string[]
       tab: Tab
       now: number
+      context: Fill | null
     }
   }
 }

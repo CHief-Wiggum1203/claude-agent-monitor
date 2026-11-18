@@ -387,3 +387,27 @@ test('it starts as a widget showing one line per agent, nothing to click', async
   release()
   await call
 })
+
+test('the widget and the panel show how full the context window is', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'agenten' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const widget = { ...PANE, surface: 'desktop', props: { ...PANE.props, placement: 'widget' } } as const
+  let ui = await $.ui.mount(widget)
+  expect(await ui.find({ type: 'Text', text: /Kontext/ })).toBeUndefined()
+  await ui.unmount()
+
+  await $.session.measure({ context: { tokens: 246_900, window: 400_000, percent: 62 }, rateLimits: [], changed: ['context'] })
+
+  ui = await $.ui.mount(widget)
+  expect((await ui.find({ type: 'Text', text: /Kontext/ }))?.text).toBe('Kontext ███████░░░░░ 62 % · 246.9k / 400k')
+  await ui.unmount()
+
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Kontext/ }))?.text).toBe('Kontext ███████░░░░░ 62 % · 246.9k / 400k')
+  await ui.unmount()
+})

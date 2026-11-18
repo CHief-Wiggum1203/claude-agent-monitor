@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, StateDollar, ToolCallInput } from 'claude-code'
 
-import type { Agent, Call, Change, FileTouch, Run, Status } from '../types'
+import type { Agent, Call, Change, FileTouch, Fill, Run, Status } from '../types'
 
 const PANE = 'agent-monitor'
 const TITLE = 'Agenten live'
@@ -102,6 +102,19 @@ function changesOf(e: ToolCallInput, agentId: string): Change[] {
 
 // The time the pane counts elapsed seconds against, ticked while anything runs.
 const now = atom({ plugin: 'agent-monitor', key: 'now' } as const, 0)
+// The context window's fill as the last measurement reported it.
+const context = atom({ plugin: 'agent-monitor', key: 'context' } as const, null)
+
+const BAR_CELLS = 12
+const kTokens = (n: number) => `${Math.round(n / 100) / 10}k`
+
+/** "Kontext ███████░░░░░ 62 % · 246.9k / 400k", or nothing before the first reading. */
+function contextLine(fill: Fill | null) {
+  if (fill === null) return undefined
+  const filled = Math.round((fill.percent / 100) * BAR_CELLS)
+  const bar = '█'.repeat(filled) + '░'.repeat(BAR_CELLS - filled)
+  return `Kontext ${bar} ${fill.percent} % · ${kTokens(fill.tokens)} / ${kTokens(fill.window)}`
+}
 
 const GLYPH: Record<Status, string> = {
   running: '●',
@@ -371,6 +384,15 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('session.measure', async ($, e, next) => {
+    const { tokens, window, percent } = e.context
+    if (e.changed.includes('context') && tokens !== undefined && percent !== undefined) {
+      await update($, context, () => ({ tokens, window, percent }))
+    }
+
+    return next(e)
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const table = $.ui.resolve(e)
     const { Box, Button, Text } = table
@@ -384,6 +406,8 @@ export const register: Register = (on, options) => {
     const opened = await read($, expanded)
     const diffs = await read($, openDiffs)
     const rows = ordered(list)
+    const fillLine = contextLine(await read($, context))
+    const fillRow = fillLine !== undefined && <Text wrap="truncate-end">{fillLine}</Text>
 
     const logo = (agent: Agent, size: 'big' | 'small') =>
       Svg === undefined ? (
@@ -446,6 +470,7 @@ export const register: Register = (on, options) => {
 
       return (
         <Box flexDirection="column">
+          {fillRow}
           {glance.length === 0 && <Text dimColor>Noch keine Aktivität.</Text>}
           {glance.map(({ agent }) => {
             const call = agent.running[agent.running.length - 1]
@@ -584,6 +609,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" gap={1}>
+        {fillRow}
         {tabs}
         {rows.length === 0 && <Text dimColor>Noch keine Aktivität.</Text>}
         {rows.map(({ agent, depth }) => agentRow(agent, depth, touched, agent.id))}
