@@ -411,3 +411,48 @@ test('the widget and the panel show how full the context window is', async ($, o
   expect((await ui.find({ type: 'Text', text: /Kontext/ }))?.text).toBe('Kontext ███████░░░░░ 62 % · 246.9k / 400k')
   await ui.unmount()
 })
+
+test('an advisor call shows on the row of the agent that asked, in the panel and the widget', async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  on('command.register', () => ({ value: { command: 'agenten' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      serverToolUses: [
+        { id: 's1', name: 'advisor', input: {}, startedAt: 1, endedAt: 2 },
+        { id: 's2', name: 'web_search', input: {}, startedAt: 3, endedAt: 4 },
+      ],
+      stopReason: 'end_turn',
+      usage: null,
+    }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: 'los', turnId: 't1' })
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Tools/ }))?.text).not.toContain('Advisor')
+  await ui.unmount()
+
+  for (const index of [0, 1]) {
+    for await (const _ of $.turn.step({ turnId: 't1', index, model: 'opus', messageCount: 1 }));
+  }
+
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Tools/ }))?.text).toMatch(/0 Tools · 2× Advisor$/)
+  await ui.unmount()
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: { ...PANE.props, placement: 'widget' } })
+  expect((await ui.find({ type: 'Text', text: /Hauptagent/ }))?.text).toMatch(/ · 2× Advisor$/)
+  await ui.unmount()
+
+  // A new prompt counts from zero again.
+  await $.turn.start({ text: 'weiter', turnId: 't2' })
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /läuft/ }))?.text).not.toContain('Advisor')
+  await ui.unmount()
+})

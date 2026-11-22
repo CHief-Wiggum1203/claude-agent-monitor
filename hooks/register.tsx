@@ -12,7 +12,7 @@ const WIDGET_ROWS = 4
 // Change the tag when Agent's fields change: it declines what an earlier
 // version stored, which outlives a reload.
 const agents = atom({ plugin: 'agent-monitor', key: 'agents' } as const, [], {
-  shape: 'agents-3',
+  shape: 'agents-4',
 })
 
 // The main agent wears Claude's own orange; each subagent the first free one after it.
@@ -48,7 +48,7 @@ const openDiffs = atom({ plugin: 'agent-monitor', key: 'openDiffs' } as const, [
 const tab = atom({ plugin: 'agent-monitor', key: 'tab' } as const, 'agents')
 // Earlier prompts, newest first, and the one running now.
 const history = atom({ plugin: 'agent-monitor', key: 'history' } as const, [], {
-  shape: 'history-1',
+  shape: 'history-2',
 })
 const prompt = atom({ plugin: 'agent-monitor', key: 'prompt' } as const, '')
 // The earlier prompts opened in the pane.
@@ -178,6 +178,7 @@ function blank(id: string, at: number, color: string): Agent {
     startedAt: at,
     endedAt: null,
     calls: 0,
+    advisor: 0,
     running: [],
   }
 }
@@ -281,7 +282,7 @@ export const register: Register = (on, options) => {
       await update($, prompt, () => e.text.trim().split('\n')[0] ?? '')
       await update($, agents, all => all.filter(a => a.id === MAIN || a.status === 'running'))
       await update($, files, () => [])
-      await upsert($, MAIN, at, a => ({ ...a, status: 'running', startedAt: at, endedAt: null, calls: 0, running: [] }))
+      await upsert($, MAIN, at, a => ({ ...a, status: 'running', startedAt: at, endedAt: null, calls: 0, advisor: 0, running: [] }))
     } else {
       await upsert($, e.agentId, at, a => ({ ...a, status: 'running', endedAt: null }))
     }
@@ -356,6 +357,16 @@ export const register: Register = (on, options) => {
 
     return ran
   }).catch(($, e, next) => next(e))
+
+  // The advisor runs on the API's side: no tool.call, only the step's result names it.
+  on('turn.step', async function* ($, e, next) {
+    const step = yield* next(e)
+    const asked = (step.serverToolUses ?? []).filter(use => use.name === 'advisor').length
+    const id = e.agentId ?? MAIN
+    if (asked > 0) await update($, agents, list => list.map(a => (a.id === id ? { ...a, advisor: a.advisor + asked } : a)))
+
+    return step
+  })
 
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId ?? MAIN
@@ -437,6 +448,7 @@ export const register: Register = (on, options) => {
           <Text dimColor wrap="truncate-end">
             {'  '}
             {WORD[agent.status]} · {elapsed(agent, at)} · {agent.calls} {agent.calls === 1 ? 'Tool' : 'Tools'}
+            {agent.advisor > 0 && ` · ${agent.advisor}× Advisor`}
             {changedFiles > 0 && ` · ${changedFiles} ${changedFiles === 1 ? 'Datei' : 'Dateien'} geändert`}
           </Text>
           {agent.running.map(call => {
@@ -486,6 +498,7 @@ export const register: Register = (on, options) => {
                   <Text dimColor>
                     {' '}
                     · {elapsed(agent, at)} · {doing}
+                    {agent.advisor > 0 && ` · ${agent.advisor}× Advisor`}
                   </Text>
                 </Text>
               </Box>

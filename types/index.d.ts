@@ -17,6 +17,8 @@ export type Agent = {
   startedAt: number
   endedAt: number | null
   calls: number
+  /** How often it asked the advisor since its prompt began. */
+  advisor: number
   running: Call[]
 }
 
